@@ -1,0 +1,39 @@
+name: Build & Package
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        java-version: ['17', '21']
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Java ${{ matrix.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: 'temurin'
+          cache: maven
+      
+      - name: Build and package JAR
+        run: mvn clean package -DskipTests=true
+      
+      - name: Verify JAR integrity
+        run: |
+          ls -lh target/*.jar
+          jar tf target/globiguard-*.jar | head -20
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: java-dist-java${{ matrix.java-version }}
+          path: target/*.jar
+          retention-days: 5

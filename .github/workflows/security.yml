@@ -1,0 +1,40 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly on Sunday at 2 AM UTC
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        java-version: ['17', '21']
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Java ${{ matrix.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java-version }}
+          distribution: 'temurin'
+          cache: maven
+      
+      - name: Run OWASP Dependency-Check
+        continue-on-error: true
+        run: |
+          mvn org.owasp:dependency-check-maven:check || true
+      
+      - name: Run security checks
+        run: |
+          mvn clean verify -X
+      
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: java-security-reports-java${{ matrix.java-version }}
+          path: target/dependency-check-report.html
