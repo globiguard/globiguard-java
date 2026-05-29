@@ -1,0 +1,33 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.globiguard</groupId>
+  <artifactId>globiguard</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+  <name>GlobiGuard Java SDK</name>
+  <description>Official dependency-minimal Java SDK for GlobiGuard trusted access workflows.</description>
+  <url>https://globiguard.com</url>
+  <licenses>
+    <license>
+      <name>Apache License 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+    </license>
+  </licenses>
+  <scm>
+    <url>https://github.com/globiguard/globiguard-java</url>
+    <connection>scm:git:https://github.com/globiguard/globiguard-java.git</connection>
+  </scm>
+  <developers>
+    <developer>
+      <name>GlobiGuard</name>
+      <url>https://globiguard.com</url>
+    </developer>
+  </developers>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+</project>
+
