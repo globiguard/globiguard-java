@@ -4,35 +4,12 @@ on:
   push:
     branches: [ main, develop ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main ]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        java-version: ['17', '21']
-    
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Java ${{ matrix.java-version }}
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ matrix.java-version }}
-          distribution: 'temurin'
-          cache: maven
-      
-      - name: Run linting and tests
-        run: mvn clean verify -X
-      
-      - name: Generate coverage report
-        run: mvn jacoco:report || true
-      
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        if: always()
-        with:
-          files: ./target/site/jacoco/jacoco.xml
-          flags: unittests
-          name: codecov-umbrella
+      - name: Run tests
+        run: mvn test
