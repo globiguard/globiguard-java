@@ -2,6 +2,7 @@ package com.globiguard;
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -142,12 +143,22 @@ public final class Globiguard {
     public String list() throws IOException, InterruptedException { return transport.request("GET", basePath, null, null); }
     public String get(String id) throws IOException, InterruptedException { return transport.request("GET", basePath + "/" + id, null, null); }
     public String create(String jsonBody) throws IOException, InterruptedException { return transport.request("POST", basePath, jsonBody, null); }
-    public String post(String suffix, String jsonBody) throws IOException, InterruptedException { return transport.request("POST", basePath + "/" + suffix.replaceFirst("^/+", ""), jsonBody, null); }
+    public String post(String suffix, String jsonBody) throws IOException, InterruptedException { 
+      var encodedSuffix = URLEncoder.encode(suffix.replaceFirst("^/+", ""), StandardCharsets.UTF_8);
+      return transport.request("POST", basePath + "/" + encodedSuffix, jsonBody, null); 
+    }
   }
 
   public record GovernedActions(Transport transport) {
     public String authorizeActionOrThrow(String jsonBody) throws IOException, InterruptedException {
-      var response = transport.request("POST", "/v1/actions/authorize", jsonBody, null);
+      return authorizeActionOrThrow(jsonBody, null, null);
+    }
+    
+    public String authorizeActionOrThrow(String jsonBody, String idempotencyKey, String correlationId) throws IOException, InterruptedException {
+      var headers = new HashMap<String, String>();
+      if (idempotencyKey != null) headers.put("idempotency-key", idempotencyKey);
+      if (correlationId != null) headers.put("correlation-id", correlationId);
+      var response = transport.request("POST", "/v1/actions/authorize", jsonBody, headers.isEmpty() ? null : headers);
       if (response.contains("\"decision\":\"BLOCK\"")) throw new IllegalStateException("GlobiGuard blocked the governed action.");
       return response;
     }
