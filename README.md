@@ -31,9 +31,32 @@ var client = Globiguard.Client.server(new Globiguard.Client.Options(
 ));
 
 var decision = client.governedActions().authorizeActionOrThrow(
-    "{\"actionType\":\"refund\",\"actor\":{\"id\":\"user_123\"}}"
+    """
+    {
+      "context": {
+        "actionType": "refund.create",
+        "destination": {
+          "type": "custom",
+          "name": "payments-production"
+        },
+        "dataClasses": ["CONFIDENTIAL"],
+        "actor": {
+          "id": "support-agent-123",
+          "type": "agent"
+        },
+        "purpose": "Resolve an approved customer escalation",
+        "correlationId": "case_456",
+        "idempotencyKey": "case_456:refund:v1"
+      }
+    }
+    """
 );
 ```
+
+The authorize-or-throw helper returns only `ALLOW` or `MODIFY`; `QUEUE` and
+`BLOCK` stop execution. The same governed client exposes approval status,
+metadata-only evidence summaries, incident replay, evidence export, and every
+queue review transition.
 
 ## Webhooks
 

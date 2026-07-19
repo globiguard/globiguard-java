@@ -9,12 +9,14 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
+import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.NamedParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -24,8 +26,12 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 public final class Globiguard {
+  private static final ObjectMapper JSON = new ObjectMapper();
+
   private Globiguard() {}
 
   public static final class Environments {
@@ -52,26 +58,28 @@ public final class Globiguard {
   public static final class Client {
     private final Transport transport;
     private final GovernedActions governedActions;
-    private Client(Transport transport) {
+    private final boolean readOnly;
+    private Client(Transport transport, boolean readOnly) {
       this.transport = transport;
-      this.governedActions = new GovernedActions(transport);
+      this.readOnly = readOnly;
+      this.governedActions = new GovernedActions(transport, readOnly);
     }
     public record Options(String environment, Map<String, String> services, Credential credential) {}
     public static Client server(Options options) {
       if ("publishable".equals(options.credential().kind())) throw new IllegalArgumentException("Server clients require secret or local credentials.");
-      return new Client(new Transport(options));
+      return new Client(new Transport(options), false);
     }
     public static Client browser(Options options) {
       if ("secret".equals(options.credential().kind())) throw new IllegalArgumentException("Browser clients cannot use secret credentials.");
-      return new Client(new Transport(options));
+      return new Client(new Transport(options), true);
     }
-    public ResourceClient actions() { return new ResourceClient(transport, "/v1/actions"); }
-    public ResourceClient audit() { return new ResourceClient(transport, "/v1/audit"); }
-    public ResourceClient installs() { return new ResourceClient(transport, "/v1/installs"); }
-    public ResourceClient orgs() { return new ResourceClient(transport, "/v1/orgs"); }
-    public ResourceClient policies() { return new ResourceClient(transport, "/v1/policies"); }
-    public ResourceClient queue() { return new ResourceClient(transport, "/v1/queue"); }
-    public ResourceClient workflows() { return new ResourceClient(transport, "/v1/workflows"); }
+    public ResourceClient actions() { return new ResourceClient(transport, "/v1/actions", readOnly); }
+    public ResourceClient audit() { return new ResourceClient(transport, "/v1/audit", readOnly); }
+    public ResourceClient installs() { return new ResourceClient(transport, "/v1/installs", readOnly); }
+    public ResourceClient orgs() { return new ResourceClient(transport, "/v1/orgs", readOnly); }
+    public ResourceClient policies() { return new ResourceClient(transport, "/v1/policies", readOnly); }
+    public ResourceClient queue() { return new ResourceClient(transport, "/v1/queue", readOnly); }
+    public ResourceClient workflows() { return new ResourceClient(transport, "/v1/workflows", readOnly); }
     public GovernedActions governedActions() { return governedActions; }
   }
 
@@ -94,8 +102,18 @@ public final class Globiguard {
     }
 
     public String request(String method, String path, String jsonBody, Map<String, String> headers) throws IOException, InterruptedException {
+      return request(method, path, jsonBody, headers, null);
+    }
+
+    public String request(String method, String path, String jsonBody, Map<String, String> headers, Map<String, String> query) throws IOException, InterruptedException {
       validatePath(path);
-      var uri = URI.create(options.services().get("controlPlane").replaceAll("/+$", "") + path);
+      var queryString = query == null ? "" : query.entrySet().stream()
+          .filter(entry -> entry.getValue() != null && !entry.getValue().isBlank())
+          .map(entry -> encodeQuery(entry.getKey()) + "=" + encodeQuery(entry.getValue()))
+          .reduce((left, right) -> left + "&" + right)
+          .map(value -> "?" + value)
+          .orElse("");
+      var uri = URI.create(options.services().get("controlPlane").replaceAll("/+$", "") + path + queryString);
       var builder = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(30));
       authHeaders().forEach(builder::header);
       if (headers != null) {
@@ -109,6 +127,10 @@ public final class Globiguard {
       var response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
       if (response.statusCode() < 200 || response.statusCode() >= 300) throw new IOException("GlobiGuard request failed with " + response.statusCode() + ": " + response.body());
       return response.body();
+    }
+
+    private static String encodeQuery(String value) {
+      return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     public Map<String, String> authHeaders() {
@@ -128,10 +150,15 @@ public final class Globiguard {
 
     public static void validatePath(String path) {
       if (!path.startsWith("/")) throw new IllegalArgumentException("Request path must start with /.");
-      if (path.startsWith("//") || path.contains("\\") || path.contains("?") || path.contains("#")) throw new IllegalArgumentException("Unsafe request path.");
+      if (path.startsWith("//") || path.contains("//") || path.contains("\\") || path.contains("?") || path.contains("#")) throw new IllegalArgumentException("Unsafe request path.");
       if (URI.create(path).isAbsolute()) throw new IllegalArgumentException("Absolute request paths are not allowed.");
-      for (var segment : path.split("/")) if (".".equals(segment) || "..".equals(segment)) throw new IllegalArgumentException("Dot segments are not allowed.");
       if (BAD_PERCENT.matcher(path).find()) throw new IllegalArgumentException("Invalid percent encoding.");
+      for (var segment : path.split("/")) {
+        var decoded = java.net.URLDecoder.decode(segment, StandardCharsets.UTF_8);
+        if (".".equals(decoded) || "..".equals(decoded) || decoded.contains("/") || decoded.contains("\\")) {
+          throw new IllegalArgumentException("Encoded separators and dot segments are not allowed.");
+        }
+      }
     }
 
     private static boolean isLoopback(URI uri) {
@@ -139,28 +166,93 @@ public final class Globiguard {
     }
   }
 
-  public record ResourceClient(Transport transport, String basePath) {
+  public record ResourceClient(Transport transport, String basePath, boolean readOnly) {
     public String list() throws IOException, InterruptedException { return transport.request("GET", basePath, null, null); }
-    public String get(String id) throws IOException, InterruptedException { return transport.request("GET", basePath + "/" + id, null, null); }
-    public String create(String jsonBody) throws IOException, InterruptedException { return transport.request("POST", basePath, jsonBody, null); }
-    public String post(String suffix, String jsonBody) throws IOException, InterruptedException { 
-      var encodedSuffix = URLEncoder.encode(suffix.replaceFirst("^/+", ""), StandardCharsets.UTF_8);
-      return transport.request("POST", basePath + "/" + encodedSuffix, jsonBody, null); 
+    public String get(String id) throws IOException, InterruptedException { return transport.request("GET", basePath + "/" + pathSegment(id), null, null); }
+    public String create(String jsonBody) throws IOException, InterruptedException {
+      requireWrite();
+      return transport.request("POST", basePath, jsonBody, null);
+    }
+    public String post(String suffix, String jsonBody) throws IOException, InterruptedException {
+      requireWrite();
+      var encodedSuffix = pathSegment(suffix.replaceFirst("^/+", ""));
+      return transport.request("POST", basePath + "/" + encodedSuffix, jsonBody, null);
+    }
+    private void requireWrite() {
+      if (readOnly) throw new IllegalArgumentException("Resource writes require a server client.");
     }
   }
 
-  public record GovernedActions(Transport transport) {
-    public String authorizeActionOrThrow(String jsonBody) throws IOException, InterruptedException {
-      return authorizeActionOrThrow(jsonBody, null, null);
+  public record GovernedActions(Transport transport, boolean readOnly) {
+    public String authorizeAction(String jsonBody) throws IOException, InterruptedException {
+      requireWrite("Action authorization");
+      return transport.request("POST", "/v1/actions/authorize", jsonBody, null);
     }
-    
-    public String authorizeActionOrThrow(String jsonBody, String idempotencyKey, String correlationId) throws IOException, InterruptedException {
-      var headers = new HashMap<String, String>();
-      if (idempotencyKey != null) headers.put("idempotency-key", idempotencyKey);
-      if (correlationId != null) headers.put("correlation-id", correlationId);
-      var response = transport.request("POST", "/v1/actions/authorize", jsonBody, headers.isEmpty() ? null : headers);
-      if (response.contains("\"decision\":\"BLOCK\"")) throw new IllegalStateException("GlobiGuard blocked the governed action.");
-      return response;
+
+    public String authorizeActionOrThrow(String jsonBody) throws IOException, InterruptedException {
+      return requireExecutableDecision(authorizeAction(jsonBody));
+    }
+
+    public String requestApproval(String jsonBody) throws IOException, InterruptedException {
+      requireWrite("Approval creation");
+      return transport.request("POST", "/v1/actions/approvals", jsonBody, null);
+    }
+
+    public String getApprovalStatus(String approvalId) throws IOException, InterruptedException {
+      return transport.request("GET", "/v1/actions/approvals/" + pathSegment(approvalId), null, null);
+    }
+
+    public String getEvidenceReferences(Map<String, String> query) throws IOException, InterruptedException {
+      return transport.request("GET", "/v1/actions/evidence", null, null, query);
+    }
+
+    public String exportEvidencePackage(String jsonBody) throws IOException, InterruptedException {
+      requireWrite("Evidence export");
+      return transport.request("POST", "/v1/audit/export", jsonBody == null ? "{}" : jsonBody, null);
+    }
+
+    public String getEvidencePackageSummary(String evidencePackageId) throws IOException, InterruptedException {
+      return transport.request("GET", "/v1/audit/evidence-packages/" + pathSegment(evidencePackageId) + "/summary", null, null);
+    }
+
+    public String getIncidentReplay(String lookupKind, String lookupId) throws IOException, InterruptedException {
+      if (!List.of("workflowRunId", "correlationId", "queueEntryId", "auditEventId", "authorizationId").contains(lookupKind)) {
+        throw new IllegalArgumentException("Unsupported incident replay lookup kind.");
+      }
+      return transport.request("GET", "/v1/audit/incident-replay", null, null, Map.of(lookupKind, lookupId));
+    }
+
+    public String reviewQueue(String queueEntryId, String action, String jsonBody) throws IOException, InterruptedException {
+      requireWrite("Queue review");
+      if (!List.of("approve", "reject", "modify", "escalate", "resume").contains(action)) {
+        throw new IllegalArgumentException("Unsupported queue review action.");
+      }
+      return transport.request("POST", "/v1/queue/" + pathSegment(queueEntryId) + "/" + action, jsonBody == null ? "{}" : jsonBody, null);
+    }
+
+    private void requireWrite(String operation) {
+      if (readOnly) throw new IllegalArgumentException(operation + " requires a server client.");
+    }
+
+    public String waitForApproval(String queueEntryId, int maxAttempts, Duration interval) throws IOException, InterruptedException {
+      if (maxAttempts < 1) throw new IllegalArgumentException("maxAttempts must be at least 1.");
+      var delay = interval == null ? Duration.ofSeconds(1) : interval;
+      for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+        var entry = transport.request("GET", "/v1/queue/" + pathSegment(queueEntryId), null, null);
+        var status = jsonString(entry, "status");
+        if (List.of("APPROVED", "AUTO_APPROVED", "RESUMED").contains(status)) return entry;
+        if (List.of("REJECTED", "EXPIRED", "FAILED").contains(status)) {
+          throw new IllegalStateException("Queued action resolved as " + status + "; do not perform the downstream business action.");
+        }
+        if ("MODIFIED".equals(status)) {
+          throw new IllegalStateException("The reviewer approved a modified action summary. Rebuild the real payload and request a new authorization before executing it.");
+        }
+        if (!List.of("PENDING", "ESCALATED").contains(status)) {
+          throw new IllegalStateException("GlobiGuard returned an unsupported approval state; the downstream business action remains stopped.");
+        }
+        if (attempt < maxAttempts) Thread.sleep(delay.toMillis());
+      }
+      throw new IllegalStateException("Queued action is still pending; do not perform the downstream business action yet.");
     }
   }
 
@@ -196,12 +288,14 @@ public final class Globiguard {
     public static Map<String, Object> installRegistration(BootstrapProfile profile, String packageName, String packageVersion, String integrationKind, String runtimeKind) {
       validate(profile);
       return Map.of(
+          "packageName", packageName,
+          "packageVersion", packageVersion,
+          "integrationKind", integrationKind,
+          "runtimeKind", runtimeKind,
           "environment", profile.environment(),
           "deploymentMode", profile.deploymentMode(),
           "issuerMode", profile.issuerMode(),
-          "installReporting", profile.installReporting(),
-          "package", Map.of("name", packageName, "version", packageVersion),
-          "integration", Map.of("kind", integrationKind, "runtime", runtimeKind));
+          "installReporting", profile.installReporting());
     }
     private static void validate(BootstrapProfile profile) {
       if (!Environments.isValid(profile.environment())) throw new IllegalArgumentException("Invalid environment.");
@@ -214,12 +308,35 @@ public final class Globiguard {
   }
 
   public static final class Entitlements {
+    private static final String MANIFEST_TYPE = "globiguard.entitlement.v1";
+
+    public record VerificationOptions(
+        String expectedIssuer,
+        String expectedOrgId,
+        String expectedProjectId,
+        String expectedEnvironment,
+        String expectedDeploymentMode,
+        Instant now) {
+      public static VerificationOptions defaults() {
+        return new VerificationOptions(null, null, null, null, null, Instant.now());
+      }
+    }
+
     public static String verifySignedManifest(String compactJws, Map<String, byte[]> publicKeysById) throws GeneralSecurityException {
+      return verifySignedManifest(compactJws, publicKeysById, VerificationOptions.defaults());
+    }
+
+    public static String verifySignedManifest(
+        String compactJws,
+        Map<String, byte[]> publicKeysById,
+        VerificationOptions options) throws GeneralSecurityException {
       var parts = compactJws.split("\\.");
       if (parts.length != 3) throw new IllegalArgumentException("Entitlement manifest must be compact JWS.");
-      var header = new String(base64UrlDecode(parts[0]), StandardCharsets.UTF_8);
-      if (!"EdDSA".equals(jsonString(header, "alg"))) throw new IllegalArgumentException("Entitlement manifest must use EdDSA.");
-      var kid = jsonString(header, "kid");
+      var header = parseJson(base64UrlDecode(parts[0]), "protected header");
+      if (!"EdDSA".equals(requiredText(header, "alg")) || !MANIFEST_TYPE.equals(requiredText(header, "typ"))) {
+        throw new IllegalArgumentException("Unsupported entitlement manifest protected header.");
+      }
+      var kid = requiredText(header, "kid");
       var publicKeyRaw = publicKeysById.get(kid);
       if (publicKeyRaw == null) throw new IllegalArgumentException("Unknown entitlement signing key.");
       var signature = Signature.getInstance("Ed25519");
@@ -227,13 +344,93 @@ public final class Globiguard {
       signature.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.US_ASCII));
       if (!signature.verify(base64UrlDecode(parts[2]))) throw new GeneralSecurityException("Invalid entitlement manifest signature.");
       var payload = new String(base64UrlDecode(parts[1]), StandardCharsets.UTF_8);
-      if (!"globiguard.entitlement_manifest.v1".equals(jsonString(payload, "schema"))) throw new IllegalArgumentException("Unsupported entitlement manifest schema.");
-      var now = Instant.now().getEpochSecond();
-      var nbf = jsonLong(payload, "nbf");
-      var exp = jsonLong(payload, "exp");
-      if (nbf != null && nbf > now) throw new IllegalArgumentException("Entitlement manifest is not active yet.");
-      if (exp != null && exp <= now) throw new IllegalArgumentException("Entitlement manifest is expired.");
+      var payloadNode = parseJson(payload.getBytes(StandardCharsets.UTF_8), "payload");
+      validatePayload(payloadNode);
+
+      var issuedAt = requiredInstant(payloadNode, "issuedAt");
+      var notBefore = requiredInstant(payloadNode, "notBefore");
+      var expiresAt = requiredInstant(payloadNode, "expiresAt");
+      var now = options.now() == null ? Instant.now() : options.now();
+      if (issuedAt.isAfter(expiresAt) || !notBefore.isBefore(expiresAt)) throw new IllegalArgumentException("Entitlement manifest timestamps are inconsistent.");
+      if (notBefore.isAfter(now)) throw new IllegalArgumentException("Entitlement manifest is not active yet.");
+      if (!expiresAt.isAfter(now)) throw new IllegalArgumentException("Entitlement manifest has expired.");
+
+      var subject = requiredObject(payloadNode, "subject");
+      expect(options.expectedIssuer(), requiredText(payloadNode, "issuer"), "issuer");
+      expect(options.expectedOrgId(), requiredText(subject, "orgId"), "organization");
+      expect(options.expectedProjectId(), requiredText(subject, "projectId"), "project");
+      expect(options.expectedEnvironment(), requiredText(subject, "environment"), "environment");
+      expect(options.expectedDeploymentMode(), requiredText(subject, "deploymentMode"), "deployment mode");
       return payload;
+    }
+
+    private static void validatePayload(JsonNode payload) {
+      var manifestVersion = payload.get("manifestVersion");
+      if (!MANIFEST_TYPE.equals(requiredText(payload, "manifestType"))
+          || manifestVersion == null || !manifestVersion.isIntegralNumber() || manifestVersion.intValue() != 1) {
+        throw new IllegalArgumentException("Unsupported entitlement manifest payload.");
+      }
+      for (var field : List.of("manifestId", "issuer", "issuedAt", "notBefore", "expiresAt")) requiredText(payload, field);
+
+      var subject = requiredObject(payload, "subject");
+      for (var field : List.of("orgId", "workspaceName", "orgSlug", "projectId", "projectSlug")) requiredText(subject, field);
+      if (!List.of("sandbox", "live").contains(requiredText(subject, "environment"))) throw new IllegalArgumentException("Entitlement manifest subject environment is invalid.");
+      if (!List.of("self_hosted", "sovereign").contains(requiredText(subject, "deploymentMode"))) throw new IllegalArgumentException("Entitlement manifest subject deployment mode is invalid.");
+
+      var commercial = requiredObject(payload, "commercial");
+      if (!List.of("FREE", "STARTER", "GROWTH", "SCALE", "ENTERPRISE").contains(requiredText(commercial, "commercialPlan"))) throw new IllegalArgumentException("Entitlement manifest commercial plan is invalid.");
+      if (!List.of("FREE", "PILOT", "ACTIVE", "GRACE", "PAST_DUE", "SUSPENDED", "CANCELED").contains(requiredText(commercial, "billingStatus"))) throw new IllegalArgumentException("Entitlement manifest billing status is invalid.");
+      var pilotActive = commercial.get("pilotActive");
+      if (pilotActive == null || !pilotActive.isBoolean()) throw new IllegalArgumentException("Entitlement manifest pilotActive must be boolean.");
+
+      var entitlements = requiredObject(payload, "entitlements");
+      validateNullableCounter(entitlements, "includedQueriesPerMonth");
+      validateNullableCounter(entitlements, "frameworkSlots");
+      if (!List.of("NONE", "METERED", "CONTRACT").contains(requiredText(entitlements, "overageMode"))) throw new IllegalArgumentException("Entitlement manifest overage mode is invalid.");
+    }
+
+    private static JsonNode parseJson(byte[] bytes, String label) {
+      JsonNode value;
+      try {
+        value = JSON.readTree(bytes);
+      } catch (RuntimeException error) {
+        throw new IllegalArgumentException("Invalid entitlement manifest " + label + ".", error);
+      }
+      if (value == null || !value.isObject()) throw new IllegalArgumentException("Entitlement manifest " + label + " must be a JSON object.");
+      return value;
+    }
+
+    private static JsonNode requiredObject(JsonNode parent, String field) {
+      var value = parent.get(field);
+      if (value == null || !value.isObject()) throw new IllegalArgumentException("Entitlement manifest field " + field + " must be an object.");
+      return value;
+    }
+
+    private static String requiredText(JsonNode parent, String field) {
+      var value = parent.get(field);
+      if (value == null || !value.isTextual() || value.textValue().isBlank()) throw new IllegalArgumentException("Entitlement manifest field " + field + " must be a non-empty string.");
+      return value.textValue();
+    }
+
+    private static Instant requiredInstant(JsonNode parent, String field) {
+      try {
+        return Instant.parse(requiredText(parent, field));
+      } catch (DateTimeParseException error) {
+        throw new IllegalArgumentException("Entitlement manifest field " + field + " must be an ISO timestamp.", error);
+      }
+    }
+
+    private static void validateNullableCounter(JsonNode parent, String field) {
+      var value = parent.get(field);
+      if (value == null) throw new IllegalArgumentException("Entitlement manifest field " + field + " is required.");
+      if (value.isNull()) return;
+      if (!value.isIntegralNumber() || value.longValue() < 0) throw new IllegalArgumentException("Entitlement manifest field " + field + " must be null or a non-negative integer.");
+    }
+
+    private static void expect(String expected, String actual, String label) {
+      if (expected != null && !MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), actual.getBytes(StandardCharsets.UTF_8))) {
+        throw new IllegalArgumentException("Entitlement manifest " + label + " does not match the expected value.");
+      }
     }
   }
 
@@ -248,6 +445,34 @@ public final class Globiguard {
   private static String require(String value, String label) {
     if (value == null || value.isBlank()) throw new IllegalArgumentException("Missing " + label + ".");
     return value;
+  }
+
+  private static String pathSegment(String value) {
+    return URLEncoder.encode(value, StandardCharsets.UTF_8)
+        .replace("+", "%20");
+  }
+
+  static String jsonString(String json, String field) {
+    JsonNode document;
+    try {
+      document = JSON.readTree(json);
+    } catch (RuntimeException error) {
+      throw new IllegalStateException("GlobiGuard returned invalid JSON.", error);
+    }
+    var value = document == null ? null : document.get(field);
+    if (value == null || !value.isTextual() || value.textValue().isBlank()) {
+      throw new IllegalStateException("GlobiGuard response field " + field + " must be a non-empty string.");
+    }
+    return value.textValue();
+  }
+
+  static String requireExecutableDecision(String response) {
+    return switch (jsonString(response, "decision")) {
+      case "ALLOW", "MODIFY" -> response;
+      case "BLOCK" -> throw new IllegalStateException("GlobiGuard blocked the governed action.");
+      case "QUEUE" -> throw new IllegalStateException("GlobiGuard queued the governed action for review; do not perform the downstream business action yet.");
+      default -> throw new IllegalStateException("GlobiGuard returned an unsupported decision; do not perform the downstream business action.");
+    };
   }
 
   private static byte[] base64UrlDecode(String value) {
@@ -267,16 +492,5 @@ public final class Globiguard {
     return diff == 0;
   }
 
-  private static String jsonString(String json, String key) {
-    var matcher = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*\"([^\"]+)\"").matcher(json);
-    if (!matcher.find()) return null;
-    return matcher.group(1);
-  }
-
-  private static Long jsonLong(String json, String key) {
-    var matcher = Pattern.compile("\"" + Pattern.quote(key) + "\"\\s*:\\s*(\\d+)").matcher(json);
-    if (!matcher.find()) return null;
-    return Long.parseLong(matcher.group(1));
-  }
 }
 
