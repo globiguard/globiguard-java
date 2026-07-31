@@ -1,13 +1,16 @@
 # globiguard-java
 
-Official dependency-minimal Java SDK for GlobiGuard.
+Official small-surface Java SDK for GlobiGuard.
 
-The SDK uses only the Java standard library at runtime. It mirrors the TypeScript, Python, Go, JavaScript, and .NET SDK contracts for auth headers, safe request paths, governed actions, install bootstrap, trust webhooks, and offline entitlement manifests.
+The SDK uses the Java standard library for HTTP and cryptography plus Jackson 3
+for strict JSON parsing. It mirrors the TypeScript, Python, Go, JavaScript, and
+.NET SDK contracts for auth headers, safe request paths, governed actions,
+install bootstrap, trust webhooks, and offline entitlement manifests.
 
 ## Requirements
 
 - Java 17 or newer.
-- No runtime package dependencies.
+- One runtime dependency: `tools.jackson.core:jackson-databind` 3.x.
 
 ## Install
 
@@ -53,8 +56,10 @@ var decision = client.governedActions().authorizeActionOrThrow(
 );
 ```
 
-The authorize-or-throw helper returns only `ALLOW` or `MODIFY`; `QUEUE` and
-`BLOCK` stop execution. The same governed client exposes approval status,
+The authorize-or-throw helper returns only a current, short-lived,
+obligation-free `ALLOW` that explicitly authorizes the exact action once.
+`MODIFY`, `QUEUE`, `BLOCK`, dry-run, expired, and incomplete responses stop
+execution. The same governed client exposes approval status,
 metadata-only evidence summaries, incident replay, evidence export, and every
 queue review transition.
 
@@ -70,7 +75,6 @@ if (!result.ok()) throw new IllegalStateException(result.error());
 ## Development
 
 ```bash
-javac -d target/classes src/main/java/com/globiguard/Globiguard.java
-javac -cp target/classes -d target/test-classes src/test/java/com/globiguard/GlobiguardTest.java
-java -cp "target/classes;target/test-classes" com.globiguard.GlobiguardTest
+mvn test
+mvn package
 ```

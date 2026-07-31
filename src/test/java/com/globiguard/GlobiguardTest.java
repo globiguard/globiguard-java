@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -58,12 +59,24 @@ final class GlobiguardTest {
 
   @Test
   void onlyAllowsExplicitExecutableDecisions() {
-    assertEquals("{\"decision\": \"ALLOW\"}", Globiguard.requireExecutableDecision("{\"decision\": \"ALLOW\"}"));
-    assertEquals("{\"decision\":\"MODIFY\"}", Globiguard.requireExecutableDecision("{\"decision\":\"MODIFY\"}"));
-    assertThrows(IllegalStateException.class, () -> Globiguard.requireExecutableDecision("{\"decision\":\"QUEUE\"}"));
-    assertThrows(IllegalStateException.class, () -> Globiguard.requireExecutableDecision("{\"decision\":\"BLOCK\"}"));
-    assertThrows(IllegalStateException.class, () -> Globiguard.requireExecutableDecision("{\"decision\":\"UNKNOWN\"}"));
-    assertThrows(IllegalStateException.class, () -> Globiguard.requireExecutableDecision("{}"));
+    var now = Instant.parse("2026-07-28T20:00:00Z");
+    var executableAllow = "{\"decision\":\"ALLOW\",\"executable\":true,\"nextAction\":\"EXECUTE_EXACT_ACTION_ONCE\",\"approvalState\":\"NOT_REQUIRED\",\"expiresAt\":\"2026-07-28T20:01:00Z\",\"obligations\":[],\"modifications\":{}}";
+    assertEquals(executableAllow, Globiguard.requireExecutableDecision(executableAllow, false, now));
+    for (var stopped : List.of(
+        "{\"decision\":\"MODIFY\"}",
+        "{\"decision\":\"QUEUE\"}",
+        "{\"decision\":\"BLOCK\"}",
+        "{\"decision\":\"UNKNOWN\"}",
+        "{}",
+        "{\"decision\":\"ALLOW\",\"executable\":false,\"nextAction\":\"EXECUTE_EXACT_ACTION_ONCE\",\"approvalState\":\"NOT_REQUIRED\",\"expiresAt\":\"2026-07-28T20:01:00Z\"}",
+        "{\"decision\":\"ALLOW\",\"executable\":true,\"nextAction\":\"REAUTHORIZE_EXACT_ACTION\",\"approvalState\":\"NOT_REQUIRED\",\"expiresAt\":\"2026-07-28T20:01:00Z\"}",
+        "{\"decision\":\"ALLOW\",\"executable\":true,\"nextAction\":\"EXECUTE_EXACT_ACTION_ONCE\",\"approvalState\":\"PENDING\",\"expiresAt\":\"2026-07-28T20:01:00Z\"}",
+        "{\"decision\":\"ALLOW\",\"executable\":true,\"nextAction\":\"EXECUTE_EXACT_ACTION_ONCE\",\"approvalState\":\"NOT_REQUIRED\",\"expiresAt\":\"2026-07-28T20:10:00Z\"}",
+        "{\"decision\":\"ALLOW\",\"executable\":true,\"nextAction\":\"EXECUTE_EXACT_ACTION_ONCE\",\"approvalState\":\"NOT_REQUIRED\",\"expiresAt\":\"2026-07-28T20:01:00Z\",\"obligations\":[\"redact\"]}",
+        "{\"decision\":\"ALLOW\",\"executable\":true,\"nextAction\":\"EXECUTE_EXACT_ACTION_ONCE\",\"approvalState\":\"NOT_REQUIRED\",\"expiresAt\":\"2026-07-28T20:01:00Z\",\"modifications\":{\"recipient\":\"safe\"}}")) {
+      assertThrows(IllegalStateException.class, () -> Globiguard.requireExecutableDecision(stopped, false, now));
+    }
+    assertThrows(IllegalStateException.class, () -> Globiguard.requireExecutableDecision(executableAllow, true, now));
   }
 
   @Test

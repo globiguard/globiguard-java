@@ -31,6 +31,7 @@ import tools.jackson.databind.ObjectMapper;
 
 public final class Globiguard {
   private static final ObjectMapper JSON = new ObjectMapper();
+  static final Duration MAX_EXECUTION_AUTHORIZATION_TTL = Duration.ofMinutes(5);
 
   private Globiguard() {}
 
@@ -190,7 +191,7 @@ public final class Globiguard {
     }
 
     public String authorizeActionOrThrow(String jsonBody) throws IOException, InterruptedException {
-      return requireExecutableDecision(authorizeAction(jsonBody));
+      return requireExecutableDecision(authorizeAction(jsonBody), isDryRun(jsonBody), Instant.now());
     }
 
     public String requestApproval(String jsonBody) throws IOException, InterruptedException {
@@ -467,12 +468,74 @@ public final class Globiguard {
   }
 
   static String requireExecutableDecision(String response) {
-    return switch (jsonString(response, "decision")) {
-      case "ALLOW", "MODIFY" -> response;
+    return requireExecutableDecision(response, false, Instant.now());
+  }
+
+  static String requireExecutableDecision(String response, boolean simulation, Instant now) {
+    JsonNode document;
+    try {
+      document = JSON.readTree(response);
+    } catch (RuntimeException error) {
+      throw new IllegalStateException("GlobiGuard returned invalid JSON; the governed action remains stopped.", error);
+    }
+    var decisionNode = document == null ? null : document.get("decision");
+    var decision = decisionNode != null && decisionNode.isTextual() ? decisionNode.textValue() : null;
+    if (decision == null) {
+      throw new IllegalStateException("GlobiGuard returned an unsupported decision; the governed action remains stopped.");
+    }
+    switch (decision) {
       case "BLOCK" -> throw new IllegalStateException("GlobiGuard blocked the governed action.");
       case "QUEUE" -> throw new IllegalStateException("GlobiGuard queued the governed action for review; do not perform the downstream business action yet.");
-      default -> throw new IllegalStateException("GlobiGuard returned an unsupported decision; do not perform the downstream business action.");
-    };
+      case "MODIFY" -> throw new IllegalStateException("Apply modifications through a typed handler and reauthorize the exact resulting action before execution.");
+      case "ALLOW" -> { }
+      default -> throw new IllegalStateException("GlobiGuard returned an unsupported decision; the governed action remains stopped.");
+    }
+    if (simulation) throw nonExecutable("A dry-run decision is not an execution permit. Reauthorize with dryRun disabled.");
+    var executable = document.get("executable");
+    var nextAction = document.get("nextAction");
+    if (executable == null || !executable.isBoolean() || !executable.booleanValue()
+        || nextAction == null || !nextAction.isTextual() || !"EXECUTE_EXACT_ACTION_ONCE".equals(nextAction.textValue())) {
+      throw nonExecutable("The control plane marked this response as non-executable. Reauthorize before execution.");
+    }
+    var approvalState = document.get("approvalState");
+    if (approvalState == null || !approvalState.isTextual()
+        || !("NOT_REQUIRED".equals(approvalState.textValue()) || "APPROVED".equals(approvalState.textValue()))) {
+      throw nonExecutable("Resolve review and reauthorize the exact current action before execution.");
+    }
+    Instant expiresAt;
+    try {
+      var expiry = document.get("expiresAt");
+      expiresAt = expiry != null && expiry.isTextual() ? Instant.parse(expiry.textValue()) : null;
+    } catch (DateTimeParseException error) {
+      expiresAt = null;
+    }
+    if (expiresAt == null || !expiresAt.isAfter(now)
+        || Duration.between(now, expiresAt).compareTo(MAX_EXECUTION_AUTHORIZATION_TTL) > 0) {
+      throw nonExecutable("Execution authority must have a current, bounded expiry. Reauthorize immediately before execution.");
+    }
+    var obligations = document.get("obligations");
+    if (obligations != null && obligations.isArray() && !obligations.isEmpty()) {
+      throw nonExecutable("Enforce all obligations and reauthorize before execution.");
+    }
+    var modifications = document.get("modifications");
+    if (modifications != null && modifications.isObject() && !modifications.isEmpty()) {
+      throw nonExecutable("Apply all modifications and reauthorize the exact resulting action before execution.");
+    }
+    return response;
+  }
+
+  private static IllegalStateException nonExecutable(String message) {
+    return new IllegalStateException(message);
+  }
+
+  private static boolean isDryRun(String request) {
+    try {
+      var document = JSON.readTree(request);
+      var dryRun = document == null ? null : document.get("dryRun");
+      return dryRun != null && dryRun.isBoolean() && dryRun.booleanValue();
+    } catch (RuntimeException error) {
+      return false;
+    }
   }
 
   private static byte[] base64UrlDecode(String value) {
