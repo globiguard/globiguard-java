@@ -7,7 +7,7 @@ This repository uses GitHub Actions for automated testing, building, and publish
 ### Workflows
 
 #### 1. **Test & Lint** (`test.yml`)
-- **Triggers:** Every push to `main`/`develop`, and on all pull requests
+- **Triggers:** Every push to `sol`/`main`/`develop`, and on all pull requests
 - **What it does:**
   - Tests across Java 17 and 21
   - Runs Maven verify
@@ -15,7 +15,7 @@ This repository uses GitHub Actions for automated testing, building, and publish
 - **Status check:** ✅ Must pass before merging to `main`
 
 #### 2. **Build & Package** (`build.yml`)
-- **Triggers:** Every push to `main`/`develop`, and on all pull requests
+- **Triggers:** Every push to `sol`/`main`/`develop`, and on all pull requests
 - **What it does:**
   - Builds JAR file
   - Verifies JAR integrity
@@ -36,7 +36,7 @@ This repository uses GitHub Actions for automated testing, building, and publish
   ```
 
 #### 4. **Security Scan** (`security.yml`)
-- **Triggers:** Every push to `main`/`develop`, weekly on Sunday
+- **Triggers:** Every push to `sol`/`main`/`develop`, weekly on Sunday
 - **What it does:**
   - Runs OWASP Dependency-Check
   - Checks for known vulnerabilities
